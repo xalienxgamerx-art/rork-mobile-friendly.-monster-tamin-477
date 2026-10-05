@@ -1,0 +1,10 @@
+{
+  "apps": [
+    {
+      "name": "Emberwild",
+      "path": "web-emberwild",
+      "framework": "web"
+    }
+  ],
+  "$schema": "https://rork.com/schema/rork.json"
+}
