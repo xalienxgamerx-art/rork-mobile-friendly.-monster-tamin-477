@@ -2,6 +2,8 @@ import { Dna, Heart, Sparkles, Utensils } from "lucide-react";
 import { ITEMS, MUTATIONS, PERSONALITIES, RARITY_COLOR, SKILLS, SPECIES, STAT_LABEL, TRAITS, ELEMENTS } from "@/game/data";
 import { GENE_KEYS, expressGene, getMonsterFootprint, getMonsterSize, tierName } from "@/game/genetics";
 import { GENE_FOR, GENE_LABEL, SEX_INFO, geneGrade, statsOf, xpToNext } from "@/game/monster";
+import { reproStateOf } from "@/game/reproduction";
+import { useGame } from "@/game/store";
 import type { Monster, StatKey } from "@/game/types";
 import { Bar, ElementBadge, Portrait, SectionTitle, Tag, hpColor } from "./ui";
 
@@ -32,6 +34,9 @@ export function SkillChip({ id }: { id: string }) {
 
 /** Full simulation readout for an owned monster (on parchment). */
 export function MonsterDetail({ mon, showGenes = true }: { mon: Monster; showGenes?: boolean }) {
+  const { gs } = useGame();
+  const tick = gs?.tick ?? 0;
+  const rp = mon.repro;
   const sp = SPECIES[mon.speciesId];
   const stats = statsOf(mon);
   const p = PERSONALITIES[mon.personality];
@@ -142,6 +147,16 @@ export function MonsterDetail({ mon, showGenes = true }: { mon: Monster; showGen
         <div className="flex justify-between gap-2"><span className="opacity-60">generation</span><span>{mon.generation ?? 1}</span></div>
         <div className="flex justify-between gap-2"><span className="opacity-60">lineage</span><span>{mon.lineageId ?? "—"}</span></div>
         <div className="flex justify-between gap-2"><span className="opacity-60">parents</span><span>{mon.parents ? mon.parents.join(", ") : "founder"}</span></div>
+        {rp ? (
+          <div className="mt-1 border-t border-frame/40 pt-1">
+            <div className="flex justify-between gap-2"><span className="opacity-60">reproduction</span><span>{SEX_INFO[rp.mode].label}</span></div>
+            <div className="flex justify-between gap-2"><span className="opacity-60">maturity</span><span>{rp.maturity}</span></div>
+            <div className="flex justify-between gap-2"><span className="opacity-60">fertility</span><span>{rp.fertility > 0 ? `fertile (${rp.fertility})` : "infertile"}</span></div>
+            <div className="flex justify-between gap-2"><span className="opacity-60">breeding state</span><span>{reproStateOf(rp, tick)}</span></div>
+            <div className="flex justify-between gap-2"><span className="opacity-60">cooldown</span><span>{Math.max(0, rp.cooldownUntil - tick)}</span></div>
+            {rp.status === "reproducing" ? <div className="flex justify-between gap-2"><span className="opacity-60">with</span><span>{rp.engagedWith ?? "—"}</span></div> : null}
+          </div>
+        ) : null}
         <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5">
           {GENE_KEYS.map((g) => (
             <div key={g} className="flex justify-between gap-2">

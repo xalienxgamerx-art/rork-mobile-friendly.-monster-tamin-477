@@ -5,6 +5,7 @@ import { getFactions } from "./factions";
 import { discoverFeature, emptyKnowledge, ensureKnowledge, markRoute, updateKnowledge } from "./knowledge";
 import { addLog, compass } from "./log";
 import { createMonster, displayName, grantXp, performSynthesis, rollMutations, rollPersonality, statOf } from "./monster";
+import { advanceReproduction, canReproduce, makeReproProfile, maturityFor, rollReproMode } from "./reproduction";
 import { seesTile } from "./perception";
 import { Rng, clamp, hash2, hash3, hashString } from "./rng";
 import type { Disposition, GameState, ItemId, Monster, OriginId, WeatherId, WildCreature } from "./types";
@@ -16,7 +17,7 @@ export { sightRadius } from "./perception";
 export const CHUNK = 16;
 const LOAD_R = 3;
 const SIM_R = 30;
-export const SAVE_VERSION = 11;
+export const SAVE_VERSION = 12;
 export const PEN_MAX = 30;
 export const INN_COST = 12;
 
@@ -149,6 +150,7 @@ function makeCreature(id: string, speciesId: string, x: number, y: number, level
     genes: rollGenome(rng, speciesId),
     gen: 1,
     lineageId: founderLineage(id),
+    repro: makeReproProfile(rollReproMode(rng, speciesId), level, 0),
     calmUntil: 0, alpha, affection: 0, stalking: false,
   };
 }
@@ -576,7 +578,7 @@ function simWildlife(state: GameState, world: World, safe: boolean): void {
         if (cheb(o.x, o.y, c.x, c.y) <= 8) count++;
         if (cheb(o.x, o.y, c.x, c.y) <= 1 && o.satiety > 70) mate = o;
       }
-      if (mate && count < 4) {
+      if (mate && count < 4 && canReproduce(c, mate, state.tick).ok) {
         for (let dy = -1; dy <= 1; dy++) {
           let done = false;
           for (let dx = -1; dx <= 1; dx++) {
@@ -671,6 +673,8 @@ export function advance(state: GameState, ticks: number, safe = false): void {
       }
     }
     simWildlife(state, world, safe);
+    // reproductive state follows simulation time: cooldowns tick down, development completes
+    advanceReproduction(state);
     // the party fights back, follows orders and trails the player every tick
     partyCombatTurn(state, world, safe);
     groundTick(state, world);
@@ -1018,7 +1022,10 @@ export function wildToMonster(state: GameState, c: WildCreature): Monster {
     origin: `Tamed in the ${world.regionName(c.homeX, c.homeY)} lands`,
     generation: c.gen ?? 1,
     lineageId: c.lineageId ?? founderLineage(c.id),
+    sex: c.repro?.mode,
   });
+  // the wild creature's reproductive state carries over too (maturity re-derived from level)
+  if (c.repro) mon.repro = { ...c.repro, maturity: maturityFor(mon.level) };
   mon.hp = Math.max(1, Math.round(statOf(mon, "hp") * c.hpFrac));
   mon.satiety = c.satiety;
   return mon;

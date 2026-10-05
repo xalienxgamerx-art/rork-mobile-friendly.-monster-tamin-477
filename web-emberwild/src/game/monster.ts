@@ -12,6 +12,7 @@ import {
   speciesSizePair,
 } from "./genetics";
 import { Rng, hashString } from "./rng";
+import { makeReproProfile, rollReproMode } from "./reproduction";
 import type { GameState, GeneKey, Genome, Monster, MutationId, MutationRecord, PersonalityId, Sex, StatKey, Stats } from "./types";
 
 export const GENE_FOR: Record<StatKey, GeneKey> = { hp: "vigor", atk: "might", def: "guard", agi: "swift", wis: "wit" };
@@ -40,7 +41,7 @@ export const SEX_INFO: Record<Sex, { label: string; glyph: string; color: string
 
 /** Rolls a monster's sex: male/female for sexed species, asexual for spirits, slimes, the golem and plants. */
 export function rollSex(rng: Rng, speciesId: string): Sex {
-  return SPECIES[speciesId].sexed === false ? "asexual" : rng.chance(0.5) ? "female" : "male";
+  return rollReproMode(rng, speciesId);
 }
 
 export function rollMutations(rng: Rng, gloom: boolean): MutationId[] {
@@ -115,6 +116,7 @@ export function createMonster(
     generation: opts.generation ?? 1,
     lineageId: opts.lineageId ?? founderLineage("pending"),
     mutHistory: opts.mutHistory ?? [],
+    repro: makeReproProfile(sex, level, state.tick),
     wins: 0,
   };
   if (!opts.lineageId) mon.lineageId = founderLineage(mon.uid);

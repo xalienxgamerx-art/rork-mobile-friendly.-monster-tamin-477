@@ -6,11 +6,12 @@ import { BIOMES, SPECIES, footprintOf } from "../src/game/data";
 import { Factions, getFactions, migrateFactionKnowledge } from "../src/game/factions";
 import { GENE_KEYS, driftGenome, expressGene, getGeneGrade, getMonsterFootprint, inheritGene, migrateBiology, migrateCreatureBio, migrateMonsterBio, migrateMonsterGenes, mutateDelta, mutateGene, sanitizeGenome, sizeToFootprint, wildGenotypeFromSeed } from "../src/game/genetics";
 import { createMonster, displayName, migrateMonsterSex, performSynthesis, previewSynthesis, rollSex, statOf, statsOf } from "../src/game/monster";
+import { BREED_COOLDOWN_TICKS, DEVELOP_TICKS, MATURITY_LEVEL, advanceReproduction, beginReproduction, canReproduce, isBreedingAvailable, makeReproProfile, migrateRepro, migrateReproCreature, migrateReproMon, maturityFor, reproStateOf, wildReproMode } from "../src/game/reproduction";
 import { Rng } from "../src/game/rng";
 import { hasLOS } from "../src/game/perception";
 import { sampleCell } from "../src/game/mapview";
 import { getWorld, seedFromText, type Feature } from "../src/game/world";
-import type { GameState, GeneKey, GenePair, Genome, Monster, WildCreature } from "../src/game/types";
+import type { GameState, GeneKey, GenePair, Genome, Monster, Sex, WildCreature } from "../src/game/types";
 import { performance } from "node:perf_hooks";
 
 let fails = 0;
@@ -35,6 +36,7 @@ const placeAdjacent = (gs: GameState, id: string, speciesId: string, level: numb
       id, speciesId, level, x, y, homeX: x, homeY: y,
       hpFrac: 1, satiety: 60, disposition: "aggressive", activity: "Wandering", personality: "fierce",
       geneSeed: 424242, genes: wildGenotypeFromSeed(424242, speciesId), gen: 1, lineageId: `L:${id}`,
+      repro: makeReproProfile(wildReproMode(id, speciesId), level, 0),
       calmUntil: 0, alpha: false, affection: 0, stalking: false,
     };
     gs.creatures[id] = c;
@@ -711,7 +713,7 @@ ok(
 // save round trip: live-combat state persists
 const json = JSON.stringify(gs);
 const loaded = JSON.parse(json);
-ok(loaded.version === 11, "save version 11");
+ok(loaded.version === 12, "save version 12");
 ok(loaded.field && loaded.orders && loaded.ground && loaded.fighters && loaded.aggr && loaded.skillQ && "target" in loaded, "live-combat state persists");
 ok(Object.keys(loaded.knowledge.explored).length === after, "explored persists exactly");
 
@@ -1095,6 +1097,115 @@ ok(
   const s2 = JSON.parse(JSON.stringify(s1)) as GameState;
   migrateBiology(s2);
   ok(JSON.stringify(s2) === JSON.stringify(s1), "migrateBiology is idempotent across the whole game state");
+}
+
+/* ----------------------- REPRODUCTION: Phase 2 machinery --------------------- */
+
+// compatibility matrix: the three reproductive configurations, species-independent
+{
+  const g = newGame("REP-1", "Rook", "scholar", "#e8742a", previewStarter("REP-1", "mossback"));
+  const mk = (speciesId: string, sex: Sex, level = 10): Monster =>
+    createMonster(g, speciesId, level, { origin: "Test", seed: 91, sex });
+  const m1 = mk("cindermaw", "male");
+  const m2 = mk("cindermaw", "male");
+  const f1 = mk("mossback", "female");
+  const f2 = mk("sunwyrm", "female");
+  ok(canReproduce(m1, f1, g.tick).ok, "male + female are biologically compatible");
+  ok(canReproduce(f1, m1, g.tick).ok, "female + male are compatible (order-symmetric)");
+  ok(!canReproduce(m1, m2, g.tick).ok, "male + male are biologically incompatible");
+  ok(!canReproduce(f1, f2, g.tick).ok, "female + female are biologically incompatible");
+  const a1 = mk("slimekin", "asexual");
+  const a2 = mk("regalslime", "asexual");
+  ok(canReproduce(a1, a2, g.tick).ok, "asexual + asexual are compatible — two parents, neither male nor female");
+  ok(!canReproduce(a1, m1, g.tick).ok, "asexual + male are biologically incompatible");
+  ok(!canReproduce(a1, f1, g.tick).ok, "asexual + female are biologically incompatible");
+  ok(m1.speciesId !== f1.speciesId && canReproduce(m1, f1, g.tick).ok, "biological compatibility ignores species identity (mating rules decide that later)");
+  ok(!canReproduce(m1, m1, g.tick).ok, "an individual cannot reproduce with itself");
+}
+
+// fertility, maturity, cooldown and active reproduction gate compatibility
+{
+  const g = newGame("REP-2", "Rook", "scholar", "#e8742a", previewStarter("REP-2", "mossback"));
+  const mk = (speciesId: string, sex: Sex, level = 10): Monster =>
+    createMonster(g, speciesId, level, { origin: "Test", seed: 92, sex });
+  const m = mk("cindermaw", "male");
+  const f = mk("mossback", "female");
+  m.repro!.fertility = 0;
+  ok(reproStateOf(m.repro!, g.tick) === "infertile" && !canReproduce(m, f, g.tick).ok, "an infertile individual is incompatible despite a compatible partner");
+  m.repro!.fertility = 60;
+  ok(canReproduce(m, f, g.tick).ok, "fertility restored — compatible again");
+  const kid = mk("mossback", "female", 2);
+  g.pen.push(m, f, kid); // simulation advances bodies that live in the state
+  ok(kid.repro!.maturity === "immature" && !canReproduce(kid, m, g.tick).ok, "an immature individual cannot reproduce");
+  kid.level = MATURITY_LEVEL;
+  advanceReproduction(g);
+  ok(kid.repro!.maturity === "mature" && canReproduce(kid, m, g.tick).ok, "maturity comes from data, and maturing restores compatibility");
+  f.repro!.cooldownUntil = g.tick + 100;
+  ok(reproStateOf(f.repro!, g.tick) === "cooldown" && !canReproduce(f, m, g.tick).ok, "a cooling-down parent is unavailable");
+  f.repro!.cooldownUntil = g.tick;
+  ok(isBreedingAvailable(f, g.tick) && canReproduce(f, m, g.tick).ok, "cooldown expiry restores availability");
+  const res = beginReproduction(m, f, g.tick);
+  ok(
+    res.ok && res.pairing === "sexual" && res.parentIds[0] === m.uid && res.parentIds[1] === f.uid && res.developTicks === DEVELOP_TICKS && res.parents.length === 2,
+    "beginReproduction returns a structured result: pairing, parent ids, development duration",
+  );
+  ok(m.repro!.status === "reproducing" && m.repro!.engagedWith === f.uid && f.repro!.status === "reproducing", "both parents enter the reproducing state");
+  ok(!canReproduce(m, kid, g.tick).ok && !canReproduce(f, kid, g.tick).ok, "an individual already reproducing cannot start another");
+  ok(!beginReproduction(m, kid, g.tick).ok, "beginReproduction rejects an unavailable pair");
+}
+
+// two-parent asexual reproduction, development window and cooldown through simulation time
+{
+  const g = newGame("REP-3", "Rook", "scholar", "#e8742a", previewStarter("REP-3", "mossback"));
+  const mk = (speciesId: string, sex: Sex, level = 10): Monster =>
+    createMonster(g, speciesId, level, { origin: "Test", seed: 93, sex });
+  const s1 = mk("slimekin", "asexual");
+  const s2 = mk("regalslime", "asexual");
+  g.pen.push(s1, s2); // simulation advances bodies that live in the state
+  const ares = beginReproduction(s1, s2, g.tick);
+  ok(ares.ok && ares.pairing === "asexual" && s1.repro!.status === "reproducing" && s2.repro!.status === "reproducing", "two asexual parents begin a two-parent reproduction");
+  g.tick += DEVELOP_TICKS + 1;
+  const done = advanceReproduction(g);
+  ok(done.length === 2 && done.every((d) => d.pairing === "asexual"), "completed reproductions are reported for every participant");
+  ok(s1.repro!.status === "cooldown" && s1.repro!.cooldownUntil === g.tick + BREED_COOLDOWN_TICKS, "completed parents enter a biological breeding cooldown");
+  ok(!canReproduce(s1, s2, g.tick).ok, "the cooldown blocks immediate re-breeding");
+  g.tick += BREED_COOLDOWN_TICKS + 1;
+  advanceReproduction(g);
+  ok(s1.repro!.status === "available" && isBreedingAvailable(s1, g.tick), "cooldown expiry restores availability through simulation time");
+}
+
+// persistence: profiles survive round-trips, legacy bodies backfill, taming carries configuration
+{
+  const wc = Object.values(gs.creatures).find((c) => c.repro && !c.alpha);
+  ok(!!wc, "wild creatures carry reproductive profiles");
+  if (wc) {
+    const legacy = JSON.parse(JSON.stringify(wc)) as WildCreature;
+    delete legacy.repro;
+    const m1 = JSON.parse(JSON.stringify(legacy)) as WildCreature;
+    const m2 = JSON.parse(JSON.stringify(legacy)) as WildCreature;
+    migrateReproCreature(m1);
+    migrateReproCreature(m2);
+    ok(!!m1.repro && JSON.stringify(m1.repro) === JSON.stringify(m2.repro), "wild creature profile migration is deterministic");
+    migrateReproCreature(m1);
+    ok(JSON.stringify(m1.repro) === JSON.stringify(m2.repro), "wild profile migration is idempotent");
+    const g = newGame("REP-4", "Rook", "ranger", "#e8742a", previewStarter("REP-4", "mossback"));
+    const tamed = wildToMonster(g, wc);
+    ok(tamed.repro?.mode === wc.repro!.mode && tamed.sex === wc.repro!.mode, "taming carries the wild creature's reproductive configuration");
+  }
+  const g2 = newGame("REP-5", "Rook", "scholar", "#e8742a", previewStarter("REP-5", "mossback"));
+  const mon = g2.party[0];
+  const rt = JSON.parse(JSON.stringify(mon)) as Monster;
+  migrateReproMon(rt);
+  ok(JSON.stringify(rt.repro) === JSON.stringify(mon.repro), "reproductive profiles survive save round-trips unchanged");
+  const legacyM = JSON.parse(JSON.stringify(mon)) as Monster;
+  delete legacyM.repro;
+  migrateReproMon(legacyM);
+  ok(legacyM.repro?.mode === legacyM.sex && legacyM.repro.status === "available" && legacyM.repro.fertility === 100, "legacy monsters receive a sensible profile from their sex");
+  const s1 = JSON.parse(JSON.stringify(gs)) as GameState;
+  migrateRepro(s1);
+  const s2 = JSON.parse(JSON.stringify(s1)) as GameState;
+  migrateRepro(s2);
+  ok(JSON.stringify(s2) === JSON.stringify(s1), "migrateRepro is idempotent across the whole game state");
 }
 
 // waiting passes time without leaking new terrain

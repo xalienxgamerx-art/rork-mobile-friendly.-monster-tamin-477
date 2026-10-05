@@ -3,6 +3,7 @@ import { MUSIC } from "./assets";
 import { initField } from "./combat";
 import { migrateBiology, migrateMonsterGenes } from "./genetics";
 import { migrateMonsterSex } from "./monster";
+import { migrateRepro } from "./reproduction";
 import { migrateFactionKnowledge } from "./factions";
 import { ensureKnowledge } from "./knowledge";
 import { SAVE_VERSION, loadChunks } from "./sim";
@@ -135,6 +136,8 @@ export function loadSave(): boolean {
     if (gs.version <= 9) migrateFactionKnowledge(gs);
     // v11 biology: lineage metadata + explicit wild genotypes — idempotent, runs on every load
     migrateBiology(gs);
+    // v12 reproduction: reproductive profiles — idempotent, runs on every load
+    migrateRepro(gs);
     gs.version = SAVE_VERSION;
     if (gs.version !== SAVE_VERSION) return false;
     store.gs = gs;

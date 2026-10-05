@@ -54,6 +54,36 @@ export type Family = "Beast" | "Slime" | "Bird" | "Bug" | "Spirit" | "Dragon" | 
 export type Rarity = "common" | "uncommon" | "rare" | "legendary";
 export type Sex = "male" | "female" | "asexual";
 
+/** Reproductive anatomy: the three biological configurations. */
+export type ReproMode = Sex;
+/** Life-stage maturity: immature individuals cannot reproduce yet. */
+export type Maturity = "immature" | "mature";
+/** Where an individual sits in the reproduction cycle. */
+export type ReproStatus = "available" | "reproducing" | "cooldown" | "infertile" | "immature";
+/** How a compatible pair reproduces: sexed anatomy, or two asexual parents. */
+export type ReproPairing = "sexual" | "asexual";
+
+/**
+ * Biological reproduction data for one individual. Mode derives from sex;
+ * fertility, maturity, cooldown and status are independent biological state
+ * that future systems (growth, health, environment, gestation) can modify.
+ */
+export interface ReproductiveProfile {
+  mode: ReproMode;
+  /** 0–100; above 0 the individual is currently fertile. */
+  fertility: number;
+  maturity: Maturity;
+  status: ReproStatus;
+  /** Sim tick when the breeding cooldown ends (≤ tick means no cooldown). */
+  cooldownUntil: number;
+  /** Pairing of the current or most recent reproduction. */
+  pairing?: ReproPairing;
+  /** Partner body id while a reproduction is underway. */
+  engagedWith?: string;
+  /** Sim tick when the current reproduction completes development. */
+  developUntil?: number;
+}
+
 export interface Monster {
   uid: string;
   speciesId: string;
@@ -80,6 +110,8 @@ export interface Monster {
   lineageId?: string;
   /** Structured drift history: which expressed genes changed, when, and by how much. */
   mutHistory?: MutationRecord[];
+  /** Biological reproduction state (backfilled from sex on load for legacy saves). */
+  repro?: ReproductiveProfile;
   wins: number;
 }
 
@@ -103,6 +135,8 @@ export interface WildCreature {
   gen?: number;
   /** Stable lineage id carried into monsters on taming. */
   lineageId?: string;
+  /** Biological reproduction state (backfilled from the creature's id on load for legacy saves). */
+  repro?: ReproductiveProfile;
   calmUntil: number;
   alpha: boolean;
   affection: number;
