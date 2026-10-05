@@ -1,16 +1,16 @@
 /* Headless sanity check for the knowledge/perception/mapview systems + live combat. */
 import { discoveredList, ensureKnowledge, tileVisibility, anyExplored, exploredWorldCells, isRegionSeen } from "../src/game/knowledge";
 import { aggrOf, avOf, dvOf, engage, hitInfo, initField, partyFighter, partyMonAt, queueSkill, setAggr, setOrder, setTarget, terrainAt, wildFighter } from "../src/game/combat";
-import { advance, creatureAt, loadChunks, newGame, movePlayer, previewStarter, spawnLairPack, waitTurn } from "../src/game/sim";
+import { advance, creatureAt, loadChunks, newGame, movePlayer, previewStarter, spawnLairPack, waitTurn, wildToMonster } from "../src/game/sim";
 import { BIOMES, SPECIES, footprintOf } from "../src/game/data";
 import { Factions, getFactions, migrateFactionKnowledge } from "../src/game/factions";
-import { GENE_KEYS, driftGenome, expressGene, getGeneGrade, getMonsterFootprint, inheritGene, migrateMonsterGenes, mutateDelta, mutateGene, sizeToFootprint } from "../src/game/genetics";
+import { GENE_KEYS, driftGenome, expressGene, getGeneGrade, getMonsterFootprint, inheritGene, migrateBiology, migrateCreatureBio, migrateMonsterBio, migrateMonsterGenes, mutateDelta, mutateGene, sanitizeGenome, sizeToFootprint, wildGenotypeFromSeed } from "../src/game/genetics";
 import { createMonster, displayName, migrateMonsterSex, performSynthesis, previewSynthesis, rollSex, statOf, statsOf } from "../src/game/monster";
 import { Rng } from "../src/game/rng";
 import { hasLOS } from "../src/game/perception";
 import { sampleCell } from "../src/game/mapview";
 import { getWorld, seedFromText, type Feature } from "../src/game/world";
-import type { GameState, GeneKey, GenePair, Genome, WildCreature } from "../src/game/types";
+import type { GameState, GeneKey, GenePair, Genome, Monster, WildCreature } from "../src/game/types";
 import { performance } from "node:perf_hooks";
 
 let fails = 0;
@@ -34,7 +34,8 @@ const placeAdjacent = (gs: GameState, id: string, speciesId: string, level: numb
     const c: WildCreature = {
       id, speciesId, level, x, y, homeX: x, homeY: y,
       hpFrac: 1, satiety: 60, disposition: "aggressive", activity: "Wandering", personality: "fierce",
-      geneSeed: 424242, calmUntil: 0, alpha: false, affection: 0, stalking: false,
+      geneSeed: 424242, genes: wildGenotypeFromSeed(424242, speciesId), gen: 1, lineageId: `L:${id}`,
+      calmUntil: 0, alpha: false, affection: 0, stalking: false,
     };
     gs.creatures[id] = c;
     return c;
@@ -710,7 +711,7 @@ ok(
 // save round trip: live-combat state persists
 const json = JSON.stringify(gs);
 const loaded = JSON.parse(json);
-ok(loaded.version === 10, "save version 10");
+ok(loaded.version === 11, "save version 11");
 ok(loaded.field && loaded.orders && loaded.ground && loaded.fighters && loaded.aggr && loaded.skillQ && "target" in loaded, "live-combat state persists");
 ok(Object.keys(loaded.knowledge.explored).length === after, "explored persists exactly");
 
@@ -976,6 +977,124 @@ ok(
   for (let i = 0; i < 100; i++) sexes.add(rollSex(rng, "cindermaw"));
   ok(sexes.has("male") && sexes.has("female"), "sexed species roll both male and female");
   ok(rollSex(rng, "slimekin") === "asexual" && rollSex(rng, "crystal_golem") === "asexual", "asexual species never roll a sex");
+}
+
+/* --------------------------- BIOLOGY: Phase 1 foundation --------------------- */
+
+// genotype integrity: every monster and wild creature carries a full valid genome
+{
+  const g = newGame("BIO-1", "Rook", "scholar", "#e8742a", previewStarter("BIO-1", "mossback"));
+  const valid = (ge: Genome): boolean =>
+    GENE_KEYS.every((k) =>
+      typeof ge[k].a === "number" && Number.isFinite(ge[k].a) && ge[k].a >= 5 && ge[k].a <= 100 &&
+      typeof ge[k].b === "number" && Number.isFinite(ge[k].b) && ge[k].b >= 5 && ge[k].b <= 100);
+  ok(valid(g.party[0].genes), "every party monster carries a full six-gene genome within 5–100");
+  ok(Object.values(gs.creatures).length > 0, "wild creatures exist for biology checks");
+  ok(Object.values(gs.creatures).every((c) => !!c.genes && valid(c.genes)), "wild creatures carry explicit genomes within 5–100");
+  ok(gs.party.every((m) => (m.generation ?? 1) >= 1 && !!m.lineageId?.startsWith("L:") && Array.isArray(m.mutHistory)), "party monsters carry lineage metadata");
+  ok(Object.values(gs.creatures).every((c) => !!c.lineageId?.startsWith("L:") && c.gen === 1), "wild creatures are founder-lineaged");
+  ok(getMonsterFootprint(gs.party[0]) === footprintOf(SPECIES[gs.party[0].speciesId]), "a starter's size gene expresses its species' body tier");
+  const bySpecies = new Map<string, Set<number>>();
+  for (const c of Object.values(gs.creatures)) {
+    if (!c.genes) continue;
+    const s = bySpecies.get(c.speciesId) ?? new Set<number>();
+    s.add(expressGene(c.genes.size));
+    bySpecies.set(c.speciesId, s);
+  }
+  ok([...bySpecies.values()].some((s) => s.size > 1), "same-species wild individuals differ in size genetics");
+}
+
+// genotype validation: clamps recoverable data, rejects structural corruption
+{
+  const good: Genome = { vigor: { a: 90, b: 40 }, might: { a: 50, b: 50 }, guard: { a: 50, b: 50 }, swift: { a: 50, b: 50 }, wit: { a: 50, b: 50 }, size: { a: 14, b: 14 } };
+  const clamped = sanitizeGenome({ ...good, might: { a: 300, b: -20 } });
+  ok(clamped?.might.a === 100 && clamped.might.b === 5, "out-of-range alleles are clamped to 5–100");
+  ok(sanitizeGenome({ ...good, wit: undefined as unknown as GenePair }) === null, "a missing gene is structurally invalid");
+  ok(sanitizeGenome({ ...good, wit: { a: NaN, b: 50 } }) === null, "NaN cannot propagate");
+  ok(sanitizeGenome({ ...good, wit: { a: Infinity, b: 50 } }) === null, "Infinity cannot propagate");
+  ok(sanitizeGenome(null) === null && sanitizeGenome(42) === null, "non-object genomes are rejected");
+}
+
+// lineage: founders, offspring generation and lineage id, structured drift history
+{
+  const s = newGame("BIO-3", "Rook", "ranger", "#e8742a", previewStarter("BIO-3", "mossback"));
+  const a = createMonster(s, "cindermaw", 8, { origin: "Test", seed: 71 });
+  const b = createMonster(s, "mossback", 8, { origin: "Test", seed: 72 });
+  ok(a.generation === 1 && a.lineageId === `L:${a.uid}` && a.mutHistory?.length === 0, "founders are generation 1 with their own lineage id");
+  const run = (seedText: string): Monster => {
+    const st = newGame(seedText, "Rook", "ranger", "#e8742a", previewStarter(seedText, "mossback"));
+    const x = createMonster(st, "cindermaw", 8, { origin: "Test", seed: 71 });
+    const y = createMonster(st, "mossback", 8, { origin: "Test", seed: 72 });
+    return performSynthesis(st, x, y);
+  };
+  const c1 = run("BIO-3");
+  const c2 = run("BIO-3");
+  ok(c1.generation === Math.max(a.generation ?? 1, b.generation ?? 1) + 1, "offspring generation is max(parents) + 1");
+  ok(c1.lineageId === [a.lineageId!, b.lineageId!].sort()[0], "offspring carry a parent lineage id, not a name-derived id");
+  ok((c1.parents ?? []).every((p) => /^[mw]/.test(p)), "parent references are stable ids, not display names");
+  ok(JSON.stringify(c1.genes) === JSON.stringify(c2.genes) && c1.lineageId === c2.lineageId && JSON.stringify(c1.mutHistory) === JSON.stringify(c2.mutHistory), "identical seed and parents reproduce identical offspring genetics");
+  ok(
+    (c1.mutHistory ?? []).every((r) => r.to === r.from + r.delta && r.delta !== 0 && r.gen === c1.generation && ((r.dir === "up" && r.to > r.from) || (r.dir === "down" && r.to < r.from))),
+    "mutation history is structured data with direction and generation",
+  );
+  a.nickname = "Renamed Parent";
+  const c3 = performSynthesis(s, a, b);
+  ok(c3.lineageId === [a.lineageId!, b.lineageId!].sort()[0], "lineage ids ignore display names");
+  const rt = JSON.parse(JSON.stringify(c1)) as Monster;
+  migrateMonsterBio(rt);
+  ok(rt.lineageId === c1.lineageId && rt.generation === c1.generation && JSON.stringify(rt.mutHistory) === JSON.stringify(c1.mutHistory), "lineage metadata survives save round-trips unchanged");
+}
+
+// wild creatures: genotype survives taming; legacy geneSeed migration is deterministic
+{
+  const g = newGame("BIO-4", "Rook", "ranger", "#e8742a", previewStarter("BIO-4", "mossback"));
+  const c = Object.values(gs.creatures).find((x) => x.genes && !x.alpha);
+  ok(!!c, "a tameable wild creature exists");
+  if (c?.genes) {
+    const mon = wildToMonster(g, c);
+    ok(JSON.stringify(mon.genes) === JSON.stringify(c.genes), "taming preserves the wild creature's genotype exactly");
+    ok(mon.lineageId === c.lineageId && mon.generation === c.gen, "taming preserves the wild creature's lineage identity");
+  }
+  const fc = Object.values(gs.creatures)[0]!;
+  const f = wildFighter(gs, fc);
+  ok(f.fp === getMonsterFootprint(f.mon), "a wild creature's combat footprint derives from its own size gene");
+  const legacy = JSON.parse(JSON.stringify(fc)) as WildCreature;
+  delete legacy.genes;
+  delete legacy.gen;
+  delete legacy.lineageId;
+  const m1 = JSON.parse(JSON.stringify(legacy)) as WildCreature;
+  const m2 = JSON.parse(JSON.stringify(legacy)) as WildCreature;
+  migrateCreatureBio(m1);
+  migrateCreatureBio(m2);
+  ok(m1.gen === 1 && m1.lineageId === `L:${legacy.id}`, "legacy wild creatures get founder lineage metadata");
+  ok(JSON.stringify(m1.genes) === JSON.stringify(wildGenotypeFromSeed(legacy.geneSeed, legacy.speciesId)), "legacy wild genetics derive deterministically from the gene seed");
+  ok(JSON.stringify(m1.genes) === JSON.stringify(m2.genes), "legacy wild migration is deterministic");
+  migrateCreatureBio(m1);
+  ok(JSON.stringify(m1) === JSON.stringify(m2), "re-migrating a migrated wild creature changes nothing");
+}
+
+// monster migration: corruption regenerates deterministically, scalar five-gene data still migrates
+{
+  const g = newGame("BIO-5", "Rook", "scholar", "#e8742a", previewStarter("BIO-5", "mossback"));
+  const m = g.party[0];
+  const good = JSON.parse(JSON.stringify(m)) as Monster;
+  (m.genes as unknown as Record<string, unknown>).vigor = { a: NaN, b: 50 };
+  migrateMonsterGenes(m);
+  migrateMonsterBio(m);
+  ok(m.generation === 1 && m.lineageId === `L:${m.uid}` && Array.isArray(m.mutHistory), "legacy monsters receive founder metadata");
+  const again = JSON.parse(JSON.stringify(m)) as Monster;
+  migrateMonsterGenes(again);
+  migrateMonsterBio(again);
+  ok(JSON.stringify(again) === JSON.stringify(m), "corruption recovery and bio backfill are idempotent");
+  const v6 = JSON.parse(JSON.stringify(good)) as Monster;
+  (v6 as unknown as { genes: unknown }).genes = { vigor: 72, might: 55, guard: 48, swift: 61, wit: 40 };
+  migrateMonsterGenes(v6);
+  ok(v6.genes.vigor.a === 72 && typeof v6.genes.size.a === "number", "scalar five-gene monsters gain size genetics from their species band");
+  const s1 = JSON.parse(JSON.stringify(gs)) as GameState;
+  migrateBiology(s1);
+  const s2 = JSON.parse(JSON.stringify(s1)) as GameState;
+  migrateBiology(s2);
+  ok(JSON.stringify(s2) === JSON.stringify(s1), "migrateBiology is idempotent across the whole game state");
 }
 
 // waiting passes time without leaking new terrain

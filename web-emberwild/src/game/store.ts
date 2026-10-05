@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { MUSIC } from "./assets";
 import { initField } from "./combat";
-import { migrateMonsterGenes } from "./genetics";
+import { migrateBiology, migrateMonsterGenes } from "./genetics";
 import { migrateMonsterSex } from "./monster";
 import { migrateFactionKnowledge } from "./factions";
 import { ensureKnowledge } from "./knowledge";
@@ -133,6 +133,8 @@ export function loadSave(): boolean {
     if (gs.version <= 8) gs.loadedChunks = [];
     // v9 → v10: faction knowledge records, home banner resolved
     if (gs.version <= 9) migrateFactionKnowledge(gs);
+    // v11 biology: lineage metadata + explicit wild genotypes — idempotent, runs on every load
+    migrateBiology(gs);
     gs.version = SAVE_VERSION;
     if (gs.version !== SAVE_VERSION) return false;
     store.gs = gs;

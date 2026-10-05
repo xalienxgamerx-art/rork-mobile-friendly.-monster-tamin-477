@@ -12,6 +12,17 @@ export interface GenePair {
 }
 export type Genome = Record<GeneKey, GenePair>;
 
+/** One expressed-gene change caused by genetic drift, as structured data. */
+export interface MutationRecord {
+  gene: GeneKey;
+  from: number;
+  to: number;
+  delta: number;
+  dir: "up" | "down";
+  /** Generation at which the mutation occurred. */
+  gen: number;
+}
+
 export type BiomeId =
   | "deep" | "sea" | "lake" | "river" | "beach" | "meadow" | "forest" | "taiga" | "gloomwood"
   | "marsh" | "steppe" | "desert" | "tundra" | "snow" | "hills" | "mountain" | "peak";
@@ -63,6 +74,12 @@ export interface Monster {
   parents: string[] | null;
   /** Display names captured at synthesis time (parents are consumed on synthesis). */
   parentNames?: string[];
+  /** Biological ancestry: founders are generation 1, offspring max(parents) + 1. */
+  generation?: number;
+  /** Stable ancestry id, independent of display names; founders own `L:<uid>`. */
+  lineageId?: string;
+  /** Structured drift history: which expressed genes changed, when, and by how much. */
+  mutHistory?: MutationRecord[];
   wins: number;
 }
 
@@ -80,6 +97,12 @@ export interface WildCreature {
   activity: string;
   personality: PersonalityId;
   geneSeed: number;
+  /** Explicit genotype — the authoritative genetics (geneSeed only seeds legacy migration). */
+  genes?: Genome;
+  /** Founder generation (wild creatures are founders unless later systems say otherwise). */
+  gen?: number;
+  /** Stable lineage id carried into monsters on taming. */
+  lineageId?: string;
   calmUntil: number;
   alpha: boolean;
   affection: number;

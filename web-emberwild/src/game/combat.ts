@@ -13,7 +13,7 @@
  * reproduce the same fight exactly.
  */
 import { SKILLS, SPECIES, STATUSES, elementMult, footprintOf, type SkillDef } from "./data";
-import { getMonsterFootprint } from "./genetics";
+import { getMonsterFootprint, wildGenotypeFromSeed } from "./genetics";
 import { addLog, compass } from "./log";
 import { createMonster, displayName, grantXp, rollMutations, statOf } from "./monster";
 import { Rng, clamp, hash2, hash3, hashString } from "./rng";
@@ -82,13 +82,14 @@ export interface Fighter {
   creatureId: string | null;
 }
 
-/** Builds the deterministic monster stats for a wild creature. */
+/** Builds the deterministic monster stats for a wild creature. Its explicit genotype is authoritative. */
 export function wildMonster(gs: GameState, c: WildCreature): Monster {
   const world = getWorld(gs.seed);
   const gloom = world.tile(c.homeX, c.homeY).biome === "gloomwood";
   const temp = { uidSeq: 0, tick: gs.tick } as GameState;
   const m = createMonster(temp, c.speciesId, c.level, {
     seed: c.geneSeed,
+    genes: c.genes ?? wildGenotypeFromSeed(c.geneSeed, c.speciesId),
     personality: c.personality,
     mutations: rollMutations(new Rng(c.geneSeed ^ 0x77), gloom),
     origin: "Wild",
@@ -108,7 +109,9 @@ export function partyFighter(gs: GameState, m: Monster): Fighter {
 }
 
 export function wildFighter(gs: GameState, c: WildCreature): Fighter {
-  return { key: c.id, side: "wild", mon: wildMonster(gs, c), x: c.x, y: c.y, fp: footprintOf(SPECIES[c.speciesId]), creatureId: c.id };
+  const mon = wildMonster(gs, c);
+  // the individual's expressed size gene drives the body (matches the species footprint by construction)
+  return { key: c.id, side: "wild", mon, x: c.x, y: c.y, fp: getMonsterFootprint(mon), creatureId: c.id };
 }
 
 /** True when (x, y) is inside the fighter's body. */

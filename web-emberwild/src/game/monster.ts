@@ -1,7 +1,18 @@
 import { MUTATIONS, PERSONALITIES, RECIPES, SKILLS, SPECIES } from "./data";
-import { driftGenome, expressGene, inheritGenome, sizeStatMul, speciesSizePair } from "./genetics";
+import {
+  childGeneration,
+  childLineage,
+  driftGenome,
+  expressGene,
+  founderLineage,
+  inheritGenome,
+  mutationRecords,
+  rollGenome,
+  sizeStatMul,
+  speciesSizePair,
+} from "./genetics";
 import { Rng, hashString } from "./rng";
-import type { GameState, GeneKey, Genome, Monster, MutationId, PersonalityId, Sex, StatKey, Stats } from "./types";
+import type { GameState, GeneKey, Genome, Monster, MutationId, MutationRecord, PersonalityId, Sex, StatKey, Stats } from "./types";
 
 export const GENE_FOR: Record<StatKey, GeneKey> = { hp: "vigor", atk: "might", def: "guard", agi: "swift", wis: "wit" };
 export const GENE_LABEL: Record<GeneKey, string> = { vigor: "Vigor", might: "Might", guard: "Guard", swift: "Swift", wit: "Wit", size: "Size" };
@@ -11,12 +22,9 @@ const PERSONALITY_IDS = Object.keys(PERSONALITIES) as PersonalityId[];
 const GOOD_MUTS: MutationId[] = ["thick_hide", "twin_hearted", "luminous", "quickened", "iron_jaw", "old_soul", "ember_veins", "star_marked"];
 const BAD_MUTS: MutationId[] = ["frail", "hollow_eyed"];
 
+/** Founder genome — delegates to the shared genetics module. */
 export function rollGenes(rng: Rng, bonus = 0, speciesId: string): Genome {
-  const g = (): number => Math.max(5, Math.min(100, Math.round(25 + rng.next() * 35 + rng.next() * 20 + bonus)));
-  const out = {} as Genome;
-  for (const k of ["vigor", "might", "guard", "swift", "wit"] as GeneKey[]) out[k] = { a: g(), b: g() };
-  out.size = speciesSizePair(rng, speciesId);
-  return out;
+  return rollGenome(rng, speciesId, bonus);
 }
 
 export function rollPersonality(rng: Rng): PersonalityId {
@@ -63,7 +71,21 @@ export function createMonster(
   state: GameState,
   speciesId: string,
   level: number,
-  opts: { genes?: Genome; personality?: PersonalityId; mutations?: MutationId[]; origin: string; seed: number; parents?: string[] | null; parentNames?: string[]; plus?: number; sex?: Sex; skills?: string[] },
+  opts: {
+    genes?: Genome;
+    personality?: PersonalityId;
+    mutations?: MutationId[];
+    origin: string;
+    seed: number;
+    parents?: string[] | null;
+    parentNames?: string[];
+    plus?: number;
+    sex?: Sex;
+    skills?: string[];
+    generation?: number;
+    lineageId?: string;
+    mutHistory?: MutationRecord[];
+  },
 ): Monster {
   const rng = new Rng(opts.seed);
   const genes = opts.genes ?? rollGenes(rng, 0, speciesId);
@@ -90,8 +112,12 @@ export function createMonster(
     bornTick: state.tick,
     parents: opts.parents ?? null,
     parentNames: opts.parentNames,
+    generation: opts.generation ?? 1,
+    lineageId: opts.lineageId ?? founderLineage("pending"),
+    mutHistory: opts.mutHistory ?? [],
     wins: 0,
   };
+  if (!opts.lineageId) mon.lineageId = founderLineage(mon.uid);
   mon.hp = statOf(mon, "hp");
   return mon;
 }
@@ -181,6 +207,10 @@ export function performSynthesis(state: GameState, a: Monster, b: Monster): Mons
   }
   const personality = rng.chance(0.5) ? a.personality : rng.chance(0.7) ? b.personality : rollPersonality(rng);
   const skills = [...skillsForLevel(p.speciesId, 1), ...p.inherited];
+  // lineage: one generation past the highest parent, sharing the parents' ancestry id
+  const generation = childGeneration([a, b]);
+  const lineageId = childLineage([a, b]);
+  const mutHistory = mutationRecords(p.genes, genes, generation);
   const child = createMonster(state, p.speciesId, 1, {
     genes,
     personality,
@@ -192,6 +222,9 @@ export function performSynthesis(state: GameState, a: Monster, b: Monster): Mons
     plus: p.plus,
     sex: p.sex,
     skills,
+    generation,
+    lineageId,
+    mutHistory,
   });
   child.bond = Math.round((a.bond + b.bond) / 2);
   return child;

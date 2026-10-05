@@ -11,7 +11,7 @@
  */
 import { SPECIES, footprintOf } from "./data";
 import { Rng, clamp, hashString } from "./rng";
-import type { GeneKey, GenePair, Genes, Genome, Monster, StatKey } from "./types";
+import type { GameState, GeneKey, GenePair, Genes, Genome, Monster, MutationRecord, StatKey, WildCreature } from "./types";
 
 export const ALLELE_MIN = 5;
 export const ALLELE_MAX = 100;
@@ -22,6 +22,29 @@ export const GENE_KEYS: GeneKey[] = ["vigor", "might", "guard", "swift", "wit", 
 const STAT_GENE_KEYS = GENE_KEYS.filter((k) => k !== "size") as Exclude<GeneKey, "size">[];
 
 const clampAllele = (v: number): number => Math.round(clamp(v, ALLELE_MIN, ALLELE_MAX));
+
+/* ------------------------------- Validation --------------------------------- */
+
+/**
+ * Validates a genome from save data: every gene must be a pair of finite
+ * numbers. Out-of-range values are clamped (recoverable); missing genes, NaN,
+ * or Infinity make the whole genome structurally invalid (null) so callers
+ * regenerate deterministically instead of propagating corruption.
+ */
+export function sanitizeGenome(g: unknown): Genome | null {
+  if (!g || typeof g !== "object") return null;
+  const src = g as Record<string, unknown>;
+  const out = {} as Genome;
+  for (const k of GENE_KEYS) {
+    const p = src[k];
+    if (!p || typeof p !== "object") return null;
+    const a = (p as { a: unknown }).a;
+    const b = (p as { b: unknown }).b;
+    if (typeof a !== "number" || typeof b !== "number" || !Number.isFinite(a) || !Number.isFinite(b)) return null;
+    out[k] = { a: clampAllele(a), b: clampAllele(b) };
+  }
+  return out;
+}
 
 /** Expressed value of a gene: the average of its two alleles (90/40 → 65). */
 export const expressGene = (p: GenePair): number => Math.round((clampAllele(p.a) + clampAllele(p.b)) / 2);
@@ -74,6 +97,44 @@ export function driftGenome(g: Genome, rng: Rng): Genome {
   return out;
 }
 
+/* ------------------------------ Founders & lineage --------------------------- */
+
+/** A founder's lineage id: derived from the stable individual id, never a name. */
+export const founderLineage = (id: string): string => `L:${id}`;
+
+/** A monster's generation — founders default to 1. */
+export const genOf = (m: { generation?: number }): number => m.generation ?? 1;
+
+/**
+ * Offspring lineage: the lexicographically smallest parent lineage id —
+ * symmetric in parent order and deterministic, so siblings share one stable
+ * ancestry id regardless of which parent was listed first.
+ */
+export function childLineage(parents: { uid: string; lineageId?: string }[]): string {
+  const ids = parents.map((p) => p.lineageId ?? founderLineage(p.uid)).sort();
+  return ids[0] ?? founderLineage("lost");
+}
+
+/** Offspring generation: one past the highest parent generation. */
+export function childGeneration(parents: { generation?: number }[]): number {
+  return Math.max(...parents.map(genOf)) + 1;
+}
+
+/**
+ * Compares two genomes and returns the expressed-gene changes drift caused,
+ * as structured mutation records (never log text).
+ */
+export function mutationRecords(before: Genome, after: Genome, gen: number): MutationRecord[] {
+  const out: MutationRecord[] = [];
+  for (const k of GENE_KEYS) {
+    const from = expressGene(before[k]);
+    const to = expressGene(after[k]);
+    if (to === from) continue;
+    out.push({ gene: k, from, to, delta: to - from, dir: to > from ? "up" : "down", gen });
+  }
+  return out;
+}
+
 /* --------------------------------- Size ------------------------------------- */
 
 /** Expressed size (5–100) → tile footprint side. The single source of truth. */
@@ -121,6 +182,18 @@ export function sizeStatMul(key: StatKey, sizeExpr: number): number {
 
 /* ------------------------------ Genome helpers ------------------------------ */
 
+/** Founder genome: stat genes roll on the classic curve; size within the species' band. */
+export function rollGenome(rng: Rng, speciesId: string, bonus = 0): Genome {
+  const g = (): number => Math.max(ALLELE_MIN, Math.min(ALLELE_MAX, Math.round(25 + rng.next() * 35 + rng.next() * 20 + bonus)));
+  const out = {} as Genome;
+  for (const k of STAT_GENE_KEYS) out[k] = { a: g(), b: g() };
+  out.size = speciesSizePair(rng, speciesId);
+  return out;
+}
+
+/** Deterministic genotype for a wild creature, derived from its gene seed. */
+export const wildGenotypeFromSeed = (geneSeed: number, speciesId: string): Genome => rollGenome(new Rng(geneSeed ^ 0x6765), speciesId);
+
 /** Builds a genome from legacy scalar genes; size rolls within the species' band. */
 export function genomeFromGenes(g: Partial<Genes>, speciesId: string, rng: Rng): Genome {
   const out = {} as Genome;
@@ -132,17 +205,61 @@ export function genomeFromGenes(g: Partial<Genes>, speciesId: string, rng: Rng):
   return out;
 }
 
+/** Extracts whatever scalar (or half-migrated) gene data survives in a legacy genes field. */
+function scalarOf(g: unknown): Partial<Genes> {
+  const out: Partial<Genes> = {};
+  if (!g || typeof g !== "object") return out;
+  const src = g as Record<string, unknown>;
+  for (const k of STAT_GENE_KEYS) {
+    const v = src[k];
+    if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
+    else if (v && typeof v === "object" && typeof (v as GenePair).a === "number" && Number.isFinite((v as GenePair).a)) out[k] = (v as GenePair).a;
+  }
+  return out;
+}
+
 /**
  * Migration: converts pre-genetics scalar genes ({ vigor: 72 }) into an allele
  * genome ({ vigor: { a: 72, b: 72 } }) and adds a size gene from species data.
- * Idempotent — genomes pass through untouched.
+ * Valid allele genomes are clamped and pass through untouched (idempotent);
+ * structurally invalid data (NaN, missing genes) regenerates deterministically
+ * from the monster's stable uid instead of propagating corruption.
  */
 export function migrateMonsterGenes(m: Monster): void {
-  const g = m.genes as unknown;
-  const scalar = g as Partial<Genes> | null;
-  if (g && typeof g === "object" && typeof scalar?.vigor !== "number" && (g as Partial<Genome>).size) return;
+  const clean = sanitizeGenome(m.genes);
+  if (clean) {
+    m.genes = clean;
+    return;
+  }
   const rng = new Rng(hashString(m.uid) ^ 0x6e6e);
-  m.genes = genomeFromGenes(g && typeof g === "object" ? (scalar as Partial<Genes>) : {}, m.speciesId, rng);
+  m.genes = genomeFromGenes(scalarOf(m.genes), m.speciesId, rng);
+}
+
+/** Backfills lineage metadata for legacy monsters (founders: generation 1). Idempotent. */
+export function migrateMonsterBio(m: Monster): void {
+  if (typeof m.generation !== "number") m.generation = 1;
+  if (!m.lineageId) m.lineageId = founderLineage(m.uid);
+  if (!Array.isArray(m.mutHistory)) m.mutHistory = [];
+}
+
+/**
+ * Backfills a wild creature's explicit genotype (authoritative from here on)
+ * and founder lineage, deterministically from its gene seed. Idempotent.
+ */
+export function migrateCreatureBio(c: WildCreature): void {
+  const clean = sanitizeGenome(c.genes);
+  c.genes = clean ?? wildGenotypeFromSeed(c.geneSeed, c.speciesId);
+  if (typeof c.gen !== "number") c.gen = 1;
+  if (!c.lineageId) c.lineageId = founderLineage(c.id);
+}
+
+/** One idempotent biology pass over every creature in a game state — runs on every load. */
+export function migrateBiology(gs: GameState): void {
+  for (const m of [...gs.party, ...gs.pen]) {
+    migrateMonsterGenes(m);
+    migrateMonsterBio(m);
+  }
+  for (const c of Object.values(gs.creatures)) migrateCreatureBio(c);
 }
 
 /* --------------------------------- Grades ----------------------------------- */

@@ -1,6 +1,6 @@
 import { Dna, Heart, Sparkles, Utensils } from "lucide-react";
 import { ITEMS, MUTATIONS, PERSONALITIES, RARITY_COLOR, SKILLS, SPECIES, STAT_LABEL, TRAITS, ELEMENTS } from "@/game/data";
-import { expressGene, getMonsterFootprint, getMonsterSize, tierName } from "@/game/genetics";
+import { GENE_KEYS, expressGene, getMonsterFootprint, getMonsterSize, tierName } from "@/game/genetics";
 import { GENE_FOR, GENE_LABEL, SEX_INFO, geneGrade, statsOf, xpToNext } from "@/game/monster";
 import type { Monster, StatKey } from "@/game/types";
 import { Bar, ElementBadge, Portrait, SectionTitle, Tag, hpColor } from "./ui";
@@ -133,6 +133,35 @@ export function MonsterDetail({ mon, showGenes = true }: { mon: Monster; showGen
       <SectionTitle><span className="flex items-center gap-1.5"><Sparkles className="h-4 w-4" /> Skills</span></SectionTitle>
       <div className="grid gap-1.5 sm:grid-cols-2">
         {mon.skills.map((s) => <SkillChip key={s} id={s} />)}
+      </div>
+
+      <SectionTitle><span className="flex items-center gap-1.5"><Dna className="h-4 w-4" /> Biology</span></SectionTitle>
+      <div className="space-y-1 rounded border border-frame/40 bg-black/5 p-2 font-mono text-[11px]">
+        <div className="flex justify-between gap-2"><span className="opacity-60">individual</span><span>{mon.uid} · {sp.id}</span></div>
+        <div className="flex justify-between gap-2"><span className="opacity-60">physical size</span><span>{getMonsterSize(mon)} · {fp}×{fp} tiles</span></div>
+        <div className="flex justify-between gap-2"><span className="opacity-60">generation</span><span>{mon.generation ?? 1}</span></div>
+        <div className="flex justify-between gap-2"><span className="opacity-60">lineage</span><span>{mon.lineageId ?? "—"}</span></div>
+        <div className="flex justify-between gap-2"><span className="opacity-60">parents</span><span>{mon.parents ? mon.parents.join(", ") : "founder"}</span></div>
+        <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5">
+          {GENE_KEYS.map((g) => (
+            <div key={g} className="flex justify-between gap-2">
+              <span className="opacity-60">{GENE_LABEL[g]}</span>
+              <span>{expressGene(mon.genes[g])} <span className="opacity-50">[{mon.genes[g].a}/{mon.genes[g].b}]</span></span>
+            </div>
+          ))}
+        </div>
+        {mon.mutHistory?.length ? (
+          <div className="mt-1 border-t border-frame/40 pt-1">
+            {mon.mutHistory.map((r, i) => (
+              <div key={i} className="flex justify-between gap-2">
+                <span className="opacity-60">gen {r.gen} drift</span>
+                <span style={{ color: r.dir === "up" ? "#2a7a5a" : "#9a2a3a" }}>
+                  {r.gene} {r.from}→{r.to} ({r.delta > 0 ? "+" : ""}{r.delta})
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       <SectionTitle>History</SectionTitle>

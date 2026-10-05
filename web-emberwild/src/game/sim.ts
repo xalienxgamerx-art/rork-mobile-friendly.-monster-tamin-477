@@ -1,5 +1,5 @@
 import { BIOMES, DAY_TICKS, ITEMS, footprintOf, ORIGINS, PARTY_MAX, PERSONALITIES, SHOP_STOCK, SPECIES, WORLD_SIZE } from "./data";
-import { getMonsterFootprint } from "./genetics";
+import { founderLineage, getMonsterFootprint, rollGenome, wildGenotypeFromSeed } from "./genetics";
 import { engage, groundTick, initField, isHostile, partyCombatTurn, partyMonAt, wildCombatTurn } from "./combat";
 import { getFactions } from "./factions";
 import { discoverFeature, emptyKnowledge, ensureKnowledge, markRoute, updateKnowledge } from "./knowledge";
@@ -16,7 +16,7 @@ export { sightRadius } from "./perception";
 export const CHUNK = 16;
 const LOAD_R = 3;
 const SIM_R = 30;
-export const SAVE_VERSION = 10;
+export const SAVE_VERSION = 11;
 export const PEN_MAX = 30;
 export const INN_COST = 12;
 
@@ -144,7 +144,12 @@ function makeCreature(id: string, speciesId: string, x: number, y: number, level
   return {
     id, speciesId, level, x, y, homeX: x, homeY: y, hpFrac: 1,
     satiety: Math.round(40 + rng.next() * 55), disposition, activity: "Wandering", personality,
-    geneSeed: rng.int(1, 2_000_000_000), calmUntil: 0, alpha, affection: 0, stalking: false,
+    geneSeed: rng.int(1, 2_000_000_000),
+    // explicit genotype is authoritative; geneSeed remains for legacy migration
+    genes: rollGenome(rng, speciesId),
+    gen: 1,
+    lineageId: founderLineage(id),
+    calmUntil: 0, alpha, affection: 0, stalking: false,
   };
 }
 
@@ -1006,9 +1011,13 @@ export function wildToMonster(state: GameState, c: WildCreature): Monster {
   const gloom = world.tile(c.homeX, c.homeY).biome === "gloomwood";
   const mon = createMonster(state, c.speciesId, c.level, {
     seed: c.geneSeed,
+    // the wild creature's explicit genotype and lineage carry over — taming invents no biology
+    genes: c.genes ?? wildGenotypeFromSeed(c.geneSeed, c.speciesId),
     personality: c.personality,
     mutations: rollMutations(new Rng(c.geneSeed ^ 0x77), gloom),
     origin: `Tamed in the ${world.regionName(c.homeX, c.homeY)} lands`,
+    generation: c.gen ?? 1,
+    lineageId: c.lineageId ?? founderLineage(c.id),
   });
   mon.hp = Math.max(1, Math.round(statOf(mon, "hp") * c.hpFrac));
   mon.satiety = c.satiety;
